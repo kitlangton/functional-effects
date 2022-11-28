@@ -1,8 +1,9 @@
 package course.zio
 
+import zio.Schedule.WithState
 import zio._
 
-import java.time.Instant
+import java.time.{Instant, OffsetDateTime}
 
 object RecursRepeat extends ZIOAppDefault {
 
@@ -11,15 +12,15 @@ object RecursRepeat extends ZIOAppDefault {
     * Using `Schedule.recurs`, create a schedule that recurs 5 times.
     */
   val fiveTimes: Schedule[Any, Any, Long] =
-    ???
+    Schedule.recurs(5)
 
   /** EXERCISE
     *
-    * Using the `ZIO.repeat`, repeat printing "Hello World" five times to the
+    * Using the `ZIO.repeat`, repeat printing "Hello World" six times to the
     * console.
     */
   val run =
-    ???
+    ZIO.debug("Hello World").repeat(fiveTimes)
 }
 
 object RecursRetry extends ZIOAppDefault {
@@ -29,17 +30,18 @@ object RecursRetry extends ZIOAppDefault {
     * Using `Schedule.recurs`, create a schedule that recurs 5 times.
     */
   val fiveTimes: Schedule[Any, Any, Long] =
-    ???
+    Schedule.recurs(5)
 
   /** EXERCISE
     *
     * Using the `ZIO.retry`, retry the failing effect with the `fiveTimes`
     * Schedule.
     */
-  val failing = ZIO.debug("Let's Fail!") *> ZIO.fail("Failed")
+  val failing =
+    ZIO.debug("Let's Fail!") *> ZIO.fail("Failed")
 
   val run =
-    ???
+    failing.retry(fiveTimes)
 }
 
 object Spaced extends ZIOAppDefault {
@@ -49,7 +51,7 @@ object Spaced extends ZIOAppDefault {
     * Using `Schedule.spaced`, create a schedule that recurs forever every 1
     * second.
     */
-  val everySecond = ???
+  val everySecond = Schedule.spaced(1.second)
 
   val run =
     Console.printLine("Hello World").repeat(everySecond)
@@ -64,7 +66,7 @@ object BothSchedules extends ZIOAppDefault {
     * create a schedule that recurs every second, five times.
     */
   val everySecondFiveTimes =
-    ???
+    Schedule.spaced(2.second) && Schedule.recurs(123)
 
   /** EXERCISE
     *
@@ -84,7 +86,7 @@ object AndThenSchedules extends ZIOAppDefault {
     * repeats every second forever.
     */
   val fiveTimesThenEverySecond =
-    ???
+    Schedule.recurs(5) andThen Schedule.spaced(1.second)
 
   /** EXERCISE
     *
@@ -107,7 +109,8 @@ object OrElseSchedule extends ZIOAppDefault {
     * every second.
     */
   val fiveTimesOrEverySecond =
-    ???
+    Schedule.spaced(2.seconds).tapOutput(n => ZIO.debug(s"2 = $n")) ||
+      Schedule.spaced(1.second).tapOutput(n => ZIO.debug(s"1 = $n"))
 
   val run =
     Console.printLine("Okay").repeat(fiveTimesOrEverySecond)
@@ -120,7 +123,7 @@ object ExponentialSchedule extends ZIOAppDefault {
     * Using `Schedule.exponential`, create an exponential schedule that starts
     * from 10 milliseconds.
     */
-  val exponentialSchedule = ???
+  val exponentialSchedule = Schedule.exponential(10.millis)
 
   val failedWebRequest = {
     Random.nextIntBounded(10000).debug("Web Request About To Fail!") *>
@@ -138,7 +141,7 @@ object JitteredSchedule extends ZIOAppDefault {
     * Using `Schedule.jittered` produced a jittered version of a `spaced`
     * schedule.
     */
-  val jitteredExponential = ???
+  val jitteredExponential = Schedule.spaced(1.second).jittered(1, 5)
 
   val startTime     = Instant.now()
   def elapsedMillis = Instant.now().toEpochMilli - startTime.toEpochMilli
@@ -157,13 +160,26 @@ object WhileOutputSchedule extends ZIOAppDefault {
     * `Schedule.forever` that will halt when the number of recurrences exceeds
     * 100.
     */
-  val oneHundred = ???
+  val oneHundred =
+    Schedule.forever.whileOutput(_ < 100)
 
   var n         = -1
   def increment = ZIO.succeed { n += 1; n }.debug("n")
 
   val run = increment.repeat(oneHundred)
 
+}
+
+object WaitForATime extends ZIOAppDefault {
+
+  def oneHundred[A]: WithState[((Long, Long), (Unit, Chunk[A])), Any, A, Chunk[A]] =
+    (Schedule.exponential(50.millis) && Schedule.recurs(5)) *>
+      Schedule.collectAll[A]
+
+  var n         = 5
+  def increment = ZIO.succeed { n += 5; n }.debug("n")
+
+  val run = increment.repeat(oneHundred).debug("HELLO")
 }
 
 object IdentitySchedule extends ZIOAppDefault {

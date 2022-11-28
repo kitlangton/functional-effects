@@ -1,6 +1,8 @@
 package course.zio
 
 import zio._
+import zio.stream.ZStream
+
 import java.text.NumberFormat
 import java.nio.charset.StandardCharsets
 
@@ -17,9 +19,20 @@ object Sharding extends ZIOAppDefault {
   def shard[R, E, A](
       queue: Queue[A],
       n: Int,
-      worker: A => ZIO[R, E, Unit]
+      processEvent: A => ZIO[R, E, Unit]
   ): ZIO[R, Nothing, E] =
-    ???
+    Promise.make[Nothing, E].flatMap { failurePromise =>
+      val worker: URIO[R, Unit] =
+        ZIO.uninterruptibleMask { restore =>
+          restore(queue.take)
+            .flatMap(processEvent)
+            .catchAll(failurePromise.succeed(_).unit)
+            .repeatUntilZIO(_ => failurePromise.isDone)
+        }
+
+      val workers = List.fill(n)(worker)
+      ZIO.collectAllParDiscard(workers) *> failurePromise.await
+    }
 
   val run = {
     def makeWorker(ref: Ref[Int]): Int => ZIO[Any, String, Unit] =
@@ -28,13 +41,15 @@ object Sharding extends ZIOAppDefault {
           _     <- ZIO.sleep(100.millis)
           count <- ref.getAndUpdate(_ + 1)
           _ <- if (count != 100) Console.printLine(s"Worker is processing item $work after $count").orDie
-               else ZIO.fail(s"Uh oh, failed processing $work after $count")
+               else
+                 ZIO.debug("I AM ABOUT TO FAIL") *>
+                   ZIO.fail(s"Uh oh, failed processing $work after $count")
         } yield ()
 
     for {
       queue <- Queue.bounded[Int](100)
       ref   <- Ref.make(0)
-      _     <- queue.offer(1).forever.fork
+      _     <- queue.offer(-568).forever.fork
       error <- shard(queue, 10, makeWorker(ref))
       _     <- Console.printLine(s"Failed with $error")
     } yield ()
@@ -59,7 +74,40 @@ object SimpleActor extends ZIOAppDefault {
   def makeActor(initialTemperature: Double): UIO[TemperatureActor] = {
     type Bundle = (Command, Promise[Nothing, Double])
 
-    ???
+//    val users      = API.post("users").input[CreateUser]
+//    val usersPosts = API.get("users" / uuid / "posts").output[List[Post]]
+//    -
+    // ZIO: ZEE-OH
+//    -                      /comments
+//    -                 /:pid
+//    -           /posts/
+//    -       /:id
+//    - /users
+//    -
+//    users.handle { (creatUser) =>
+//      UserService.create(creatUsers)
+//    }
+
+    for {
+      commandQueue <- Queue.unbounded[Bundle]
+      temperature  <- Ref.make[Double](initialTemperature)
+      _ <- (for {
+             bundle            <- commandQueue.take
+             (command, promise) = bundle
+             t <- command match {
+                    case AdjustTemperature(newT) => temperature.getAndSet(newT)
+                    case ReadTemperature         => temperature.get
+                  }
+             _ <- promise.succeed(t)
+           } yield ()).forever.fork
+    } yield (
+        (command: Command) =>
+          for {
+            promise <- Promise.make[Nothing, Double]
+            _       <- commandQueue.offer((command, promise))
+            result  <- promise.await
+          } yield result
+    )
   }
 
   val run = {
@@ -455,4 +503,74 @@ object TicTacToe extends ZIOAppDefault {
     */
   val run =
     Console.printLine(TestBoard)
+}
+
+object Wizard {
+  final case class Spells(spells: Map[String, String]) {
+    def get(name: String): Option[String] =
+      spells.get(name)
+
+    def add(name: String, description: String): Spells =
+      Spells(spells + (name -> description))
+
+    def addMany(spells: (String, String)*): Spells =
+      Spells(this.spells ++ spells)
+  }
+
+  object Spells {
+    val default =
+      Spells(
+        Map(
+          "fireball"  -> "Everything around you bursts into flames.",
+          "lightning" -> "A bolt of lightning strikes you.",
+          "levitate"  -> "Your head goes through the ceiling."
+        )
+      )
+  }
+
+  val spellsFiberRef: FiberRef[Spells] =
+    Unsafe
+      .unsafe { implicit u =>
+        Runtime.default.unsafe
+          .run(ZIO.scoped(FiberRef.make(Spells.default)))
+          .getOrThrowFiberFailure()
+      }
+
+  def addSpells(spells: (String, String)*): ZLayer[Any, Nothing, Unit] =
+    ZLayer.scoped {
+      spellsFiberRef.locallyScopedWith(_.addMany(spells: _*))
+    }
+
+  def spell(name: String): UIO[Unit] =
+    spellsFiberRef.get.flatMap { spells =>
+      spells.get(name) match {
+        case Some(description) =>
+          Console.printLine(s"You cast $name: $description").!
+        case None =>
+          Console.printLine(s"You don't know the spell $name").!
+      }
+    }
+
+}
+
+object FiberRefExploration extends ZIOAppDefault {
+
+  private val program =
+    for {
+      _ <- Wizard.spell("fireball")
+      _ <- Wizard.spell("lightning")
+      _ <- Wizard.spell("levitate")
+      _ <- Wizard.spell("criticize")
+      _ <- Wizard.spell("eat")
+      _ <- ZIO.succeed(10)
+    } yield ()
+
+  val run =
+    program
+      .provide(
+        Wizard.addSpells(
+          "eat"       -> "You eat a sandwich and become sick.",
+          "criticize" -> "You criticize the game."
+        )
+      )
 }

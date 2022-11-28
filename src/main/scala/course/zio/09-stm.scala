@@ -34,11 +34,28 @@ object StmSwap extends ZIOAppDefault {
     *
     * Using `STM`, implement a safe version of the swap function.
     */
-  def exampleStm: UIO[Int] =
-    ???
+  def exampleStm: UIO[Int] = {
+    def swap[A](ref1: TRef[A], ref2: TRef[A]): UIO[Unit] = {
+      for {
+        v1 <- ref1.get
+        v2 <- ref2.get
+        _  <- ref2.set(v1)
+        _  <- ref1.set(v2)
+      } yield ()
+    }.commit
+
+    for {
+      ref1   <- TRef.make(100).commit
+      ref2   <- TRef.make(0).commit
+      fiber1 <- swap(ref1, ref2).repeatN(100).fork
+      fiber2 <- swap(ref2, ref1).repeatN(100).fork
+      _      <- (fiber1 zip fiber2).join
+      value  <- (ref1.get zipWith ref2.get)(_ + _).commit
+    } yield value
+  }
 
   val run =
-    exampleRef.map(_.toString).flatMap(Console.printLine(_))
+    exampleStm.map(_.toString).flatMap(Console.printLine(_))
 }
 
 object StmLock extends ZIOAppDefault {
@@ -51,16 +68,29 @@ object StmLock extends ZIOAppDefault {
     * acquisition, and release methods.
     */
   class Lock private (tref: TRef[Boolean]) {
-    def acquire: UIO[Unit] =
-      ???
+    def acquire(name: String): UIO[Unit] =
+      tref.get
+        .map { claimed =>
+          val _ = println(s"ATTEMPTING TO UNLOCK $name $claimed"); claimed
+        }
+        .flatMap(claimed =>
+          STM
+            .check(!claimed)
+            .flatMap(_ =>
+              tref
+                .set(true)
+                .map(_ => ())
+            )
+        )
+        .commit
 
     def release: UIO[Unit] =
-      ???
+      tref.set(false).commit
   }
 
   object Lock {
     def make: UIO[Lock] =
-      ???
+      TRef.make(false).commit.map(new Lock(_))
   }
 
   val run =
@@ -68,7 +98,7 @@ object StmLock extends ZIOAppDefault {
       lock <- Lock.make
       fiber1 <-
         ZIO
-          .acquireReleaseWith(lock.acquire)(_ => lock.release *> ZIO.debug("Bob  : I release it!"))(_ =>
+          .acquireReleaseWith(lock.acquire("BOB"))(_ => lock.release *> ZIO.debug("Bob  : I release it!"))(_ =>
             Console
               .printLine("Bob  : I have the lock!") *> ZIO.sleep(1.second)
           )
@@ -76,8 +106,15 @@ object StmLock extends ZIOAppDefault {
           .fork
       fiber2 <-
         ZIO
-          .acquireReleaseWith(lock.acquire)(_ => lock.release *> ZIO.debug("Sarah: I release it!"))(_ =>
+          .acquireReleaseWith(lock.acquire("SARAH"))(_ => lock.release *> ZIO.debug("Sarah: I release it!"))(_ =>
             Console.printLine("Sarah: I have the lock!") *> ZIO.sleep(1.second)
+          )
+          .repeat(Schedule.recurs(10))
+          .fork
+      fiber3 <-
+        ZIO
+          .acquireReleaseWith(lock.acquire("Alejandro"))(_ => lock.release *> ZIO.debug("Alejandro: I release it!"))(
+            _ => Console.printLine("Alejandro: I have the lock!") *> ZIO.sleep(1.second)
           )
           .repeat(Schedule.recurs(10))
           .fork

@@ -21,6 +21,7 @@ addCommandAlias(
 libraryDependencies ++= Seq(
   // ZIO
   "dev.zio" %% "zio"          % ZIOVersion,
+  "dev.zio" %% "zio-macros"   % ZIOVersion,
   "dev.zio" %% "zio-streams"  % ZIOVersion,
   "dev.zio" %% "zio-test"     % ZIOVersion % "test",
   "dev.zio" %% "zio-test-sbt" % ZIOVersion % "test",
@@ -29,6 +30,10 @@ libraryDependencies ++= Seq(
 )
 
 testFrameworks := Seq(new TestFramework("zio.test.sbt.ZTestFramework"))
+
+scalacOptions ++= Seq(
+  "-Ymacro-annotations"
+)
 
 scalacOptions in Compile in console := Seq(
   "-Ypartial-unification",

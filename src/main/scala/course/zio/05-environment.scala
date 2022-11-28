@@ -177,46 +177,105 @@ object LayerEnvironment extends ZIOAppDefault {
     def read(file: String): IO[IOException, String]
   }
 
-  final case class FilesStub(files: Map[String, String]) extends Files {
+  final case class FilesStub(files: Ref[Map[String, String]]) extends Files {
+
+    def write(fileName: String, content: String) =
+      files.update(_ + (fileName -> content))
+
+    def clearAll =
+      files.set(Map.empty)
+
     override def read(file: String): IO[IOException, String] =
-      ZIO
-        .fromOption(files.get(file))
-        .orElseFail(new IOException(s"File $file not found"))
+      files.get.flatMap { files =>
+        ZIO
+          .fromOption(files.get(file))
+          .orElseFail(new IOException(s"File $file not found"))
+      }
+
   }
 
-  final case class FilesLive(config: Config, logging: Logging, ref: Ref[Int]) extends Files {
+  object FilesStub {
+    val clearAll =
+      ZIO.serviceWithZIO[FilesStub](_.clearAll)
+
+    def write(fileName: String, content: String) =
+      ZIO.serviceWithZIO[FilesStub](_.write(fileName, content))
+  }
+
+  final case class FilesLive(
+      config: Config,
+      logging: Logging,
+      ref: Ref[Int],
+      connectionPool: ConnectionPool[DatabaseBaseType.PostgresType]
+  ) extends Files {
+    println(s"Files I have a connection pool: $connectionPool")
+
     override def read(file: String): IO[IOException, String] =
       ref.update(_ + 1) *>
         ZIO.readFile(file)
   }
 
   object Files {
-    val live: ZLayer[Config with Logging, Nothing, FilesLive] =
+    val live: ZLayer[ConnectionPool[DatabaseBaseType.PostgresType] with Logging with Config, Nothing, FilesLive] =
       ZLayer(Ref.make(0)) >>> ZLayer.fromFunction(FilesLive.apply _)
 
     val stub =
-      ZLayer.succeed(FilesStub(Map("build.sbt" -> "whee sbt", "file2" -> "content2")))
+      ZLayer {
+        Ref.make(Map.empty[String, String]).map(FilesStub(_))
+      }
   }
 
-  final case class ConnectionPool()
+  sealed trait DatabaseBaseType extends Product with Serializable
+
+  object DatabaseBaseType {
+    trait PostgresType extends DatabaseBaseType
+    trait MySqlType    extends DatabaseBaseType
+  }
+
+  final case class ConnectionPool[T <: DatabaseBaseType](name: String)
 
   object ConnectionPool {
-    val live = ZLayer.scoped {
+
+    val postgresPool: ZLayer[Any, Nothing, ConnectionPool[DatabaseBaseType.PostgresType]] = ZLayer.scoped {
       ZIO.acquireRelease {
-        ZIO.succeed(ConnectionPool()).debug("CREATING POOL")
+        ZIO.succeed(ConnectionPool[DatabaseBaseType.PostgresType]("postgres")).debug("CREATING POOL")
       } { _ =>
         ZIO.debug("CLOSING MY POOL")
       }
     }
+
+    val mySqlPool: ZLayer[Any, Nothing, ConnectionPool[DatabaseBaseType.MySqlType]] = ZLayer.scoped {
+      ZIO.acquireRelease {
+        ZIO.succeed(ConnectionPool[DatabaseBaseType.MySqlType]("mysql")).debug("CREATING POOL")
+      } { _ =>
+        ZIO.debug("CLOSING MY POOL")
+      }
+    }
+
   }
 
   trait Logging {
     def log(line: String): UIO[Unit]
   }
 
-  final case class LoggingLive(config: Config, connectionPool: ConnectionPool) extends Logging {
+  final case class LoggingLive(connectionPool: ConnectionPool[DatabaseBaseType.MySqlType]) extends Logging {
+    println(s"Logging has a connection pool: $connectionPool")
+
     override def log(line: String): UIO[Unit] =
       Console.printLine(line).orDie
+  }
+
+  final case class Application(files: Files, logging: Logging) {
+    def run: IO[IOException, Unit] =
+      for {
+        file <- files.read("build.sbt")
+        _    <- logging.log(file)
+      } yield ()
+  }
+
+  object Application {
+    val layer: ZLayer[Files with Logging, Nothing, Application] =
+      ZLayer.fromFunction(Application.apply _)
   }
 
   object Logging {
@@ -234,22 +293,27 @@ object LayerEnvironment extends ZIOAppDefault {
     *
     * Discover the inferred type of `effect`, and write it out explicitly.
     */
-  val effect: ZIO[Logging with Files, IOException, Unit] =
-    for {
-      files   <- ZIO.service[Files]
-      logging <- ZIO.service[Logging]
-      file    <- files.read("build.sbt")
-      _       <- logging.log(file)
-    } yield ()
+//  val effect: ZIO[Logging with Files, IOException, Unit] =
+//    for {
+//      files   <- ZIO.service[Files]
+//      logging <- ZIO.service[Logging]
+//      file    <- files.read("build.sbt")
+//      _       <- logging.log(file)
+//    } yield ()
 
   val booleanLayer = ZLayer.succeed(true)
 
   val run =
-    effect.provide(
-      Files.live,
-      Logging.live,
-      Config.live,
-      ConnectionPool.live
-    )
+    ZIO
+      .serviceWithZIO[Application](_.run)
+      .provide(
+        ZLayer.Debug.mermaid,
+        Application.layer,
+        Files.live,
+        Logging.live,
+        Config.live,
+        ConnectionPool.postgresPool,
+        ConnectionPool.mySqlPool
+      )
 
 }
